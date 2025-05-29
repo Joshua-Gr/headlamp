@@ -35,6 +35,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	oidc "github.com/coreos/go-oidc/v3/oidc"
@@ -652,6 +653,8 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 
 	oauthRequestMap := make(map[string]*OauthConfig)
 
+	var pkceStore sync.Map // map[state]string
+
 	r.HandleFunc("/oidc", func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 		cluster := r.URL.Query().Get("cluster")
@@ -715,7 +718,9 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 		*/
 		state := base64.StdEncoding.EncodeToString([]byte(cluster))
 		oauthRequestMap[state] = &OauthConfig{Config: oauthConfig, Verifier: verifier, Ctx: ctx}
-		http.Redirect(w, r, oauthConfig.AuthCodeURL(state), http.StatusFound)
+		codeVerifier := oauth2.GenerateVerifier() // high-entropy string
+		pkceStore.Store(state, codeVerifier) // associate verifier with the state
+		http.Redirect(w, r, oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(codeVerifier),), http.StatusFound)
 	}).Queries("cluster", "{cluster}")
 
 	r.HandleFunc("/portforward", func(w http.ResponseWriter, r *http.Request) {
@@ -757,7 +762,14 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 
 		//nolint:nestif
 		if oauthConfig, ok := oauthRequestMap[state]; ok {
-			oauth2Token, err := oauthConfig.Config.Exchange(oauthConfig.Ctx, r.URL.Query().Get("code"))
+			cv, ok := pkceStore.Load(state)
+			if !ok {
+				http.Error(w, "missing code_verifier", http.StatusBadRequest)
+				return
+			}
+			codeVerifier := cv.(string)
+			oauth2Token, err := oauthConfig.Config.Exchange(oauthConfig.Ctx, r.URL.Query().Get("code"),
+				oauth2.VerifierOption(codeVerifier))
 			if err != nil {
 				logger.Log(logger.LevelError, nil, err, "failed to exchange token")
 				http.Error(w, "Failed to exchange token: "+err.Error(), http.StatusInternalServerError)
