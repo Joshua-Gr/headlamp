@@ -40,9 +40,8 @@ import { useDispatch } from 'react-redux';
 import Namespace from '../../lib/k8s/namespace';
 import K8sNode from '../../lib/k8s/node';
 import { setNamespaceFilter } from '../../redux/filterSlice';
-import { useTypedSelector } from '../../redux/reducers/reducers';
+import { useTypedSelector } from '../../redux/hooks';
 import { NamespacesAutocomplete } from '../common/NamespacesAutocomplete';
-import { GraphNodeDetails } from './details/GraphNodeDetails';
 import { filterGraph, GraphFilter } from './graph/graphFiltering';
 import {
   collapseGraph,
@@ -53,12 +52,12 @@ import {
 } from './graph/graphGrouping';
 import { applyGraphLayout } from './graph/graphLayout';
 import { GraphLookup, makeGraphLookup } from './graph/graphLookup';
-import { forEachNode, GraphEdge, GraphNode, GraphSource } from './graph/graphModel';
+import { forEachNode, GraphEdge, GraphNode, GraphSource, Relation } from './graph/graphModel';
 import { GraphControlButton } from './GraphControls';
 import { GraphRenderer } from './GraphRenderer';
 import { SelectionBreadcrumbs } from './SelectionBreadcrumbs';
-import { kubeObjectRelations } from './sources/definitions/relations';
-import { allSources } from './sources/definitions/sources';
+import { useGetAllRelations } from './sources/definitions/relations';
+import { useGetAllSources } from './sources/definitions/sources';
 import { GraphSourceManager, useSources } from './sources/GraphSources';
 import { GraphSourcesView } from './sources/GraphSourcesView';
 import { useGraphViewport } from './useGraphViewport';
@@ -95,6 +94,12 @@ interface GraphViewContentProps {
    * See {@link GraphSource} for more information
    */
   defaultSources?: GraphSource[];
+  /**
+   * List of Graph Relations to display
+   *
+   * See {@link GraphSource} for more information
+   */
+  defaultRelations?: Relation[];
 
   /** Default filters to apply */
   defaultFilters?: GraphFilter[];
@@ -119,7 +124,7 @@ const ChipGroup = styled(Box)({
 function GraphViewContent({
   height,
   defaultNodeSelection,
-  defaultSources = allSources,
+  defaultSources = useGetAllSources(),
   defaultFilters = defaultFiltersValue,
 }: GraphViewContentProps) {
   const { t } = useTranslation();
@@ -202,7 +207,10 @@ function GraphViewContent({
   const viewport = useGraphViewport();
 
   useEffect(() => {
+    let isCurrent = true;
     applyGraphLayout(visibleGraph, viewport.aspectRatio).then(layout => {
+      if (!isCurrent) return;
+
       setLayoutedGraph(layout);
 
       // Only fit bounds when user hasn't moved viewport manually
@@ -210,6 +218,10 @@ function GraphViewContent({
         viewport.updateViewport({ nodes: layout.nodes });
       }
     });
+
+    return () => {
+      isCurrent = false;
+    };
   }, [visibleGraph, viewport]);
 
   // Reset after view change
@@ -253,10 +265,6 @@ function GraphViewContent({
       lookup: makeGraphLookup(nodes, edges),
     };
   }, [visibleGraph]);
-
-  const maybeSelectedNode = selectedNodeId
-    ? fullGraphContext.lookup.getNode(selectedNodeId)
-    : undefined;
 
   return (
     <GraphViewContext.Provider value={contextValue}>
@@ -372,14 +380,6 @@ function GraphViewContent({
               </div>
             </Box>
           </CustomThemeProvider>
-          {maybeSelectedNode && (
-            <GraphNodeDetails
-              node={maybeSelectedNode}
-              close={() => {
-                setSelectedNodeId(selectedGroup?.id ?? defaultNodeSelection);
-              }}
-            />
-          )}
         </Box>
       </FullGraphContext.Provider>
     </GraphViewContext.Provider>
@@ -450,7 +450,8 @@ function CustomThemeProvider({ children }: { children: ReactNode }) {
  * @returns
  */
 export function GraphView(props: GraphViewContentProps) {
-  const propsSources = props.defaultSources ?? allSources;
+  const propsSources = props.defaultSources ?? useGetAllSources();
+  const propsRelations = props.defaultRelations ?? useGetAllRelations();
 
   // Load plugin defined sources
   const pluginGraphSources = useTypedSelector(state => state.graphView.graphSources);
@@ -463,7 +464,7 @@ export function GraphView(props: GraphViewContentProps) {
   return (
     <StrictMode>
       <ReactFlowProvider>
-        <GraphSourceManager sources={sources} relations={kubeObjectRelations}>
+        <GraphSourceManager sources={sources} relations={propsRelations}>
           <GraphViewContent {...props} defaultSources={sources} />
         </GraphSourceManager>
       </ReactFlowProvider>

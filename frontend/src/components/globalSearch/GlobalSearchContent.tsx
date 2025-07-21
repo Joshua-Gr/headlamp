@@ -48,10 +48,15 @@ import ServiceAccount from '../../lib/k8s/serviceAccount';
 import StatefulSet from '../../lib/k8s/statefulSet';
 import { createRouteURL, getDefaultRoutes } from '../../lib/router';
 import { getClusterPrefixedPath } from '../../lib/util';
-import { useTypedSelector } from '../../redux/reducers/reducers';
+import { useTypedSelector } from '../../redux/hooks';
+import { Activity } from '../activity/Activity';
+import { ADVANCED_SEARCH_QUERY_KEY } from '../advancedSearch/AdvancedSearch';
 import { ThemePreview } from '../App/Settings/ThemePreview';
 import { setTheme, useAppThemes } from '../App/themeSlice';
+import { KubeObjectDetails } from '../resourceMap/details/KubeNodeDetails';
+import { KubeIcon } from '../resourceMap/kubeIcon/KubeIcon';
 import { Delayed } from './Delayed';
+import { useLocalStorageState } from './useLocalStorageState';
 import { useRecent } from './useRecent';
 
 const LazyKubeIcon = lazy(() =>
@@ -156,6 +161,7 @@ export function GlobalSearchContent({
   const [query, setQuery] = useState(defaultValue ?? '');
   const clusters = useClustersConf() ?? {};
   const selectedClusters = useSelectedClusters();
+  const drawerEnabled = useTypedSelector(state => state.drawerMode.isDetailDrawerEnabled);
 
   const [recent, bump] = useRecent('search-recent-items');
 
@@ -175,7 +181,19 @@ export function GlobalSearchContent({
               name: item.metadata.name,
               namespace: item.metadata.namespace,
             });
-        history.push(url);
+
+        if (drawerEnabled) {
+          Activity.launch({
+            id: item.metadata.uid,
+            content: <KubeObjectDetails resource={item} />,
+            cluster: item.cluster,
+            location: 'split-right',
+            title: item.kind + ': ' + item.metadata.name,
+            icon: <KubeIcon kind={item.kind} width="100%" height="100%" />,
+          });
+        } else {
+          history.push(url);
+        }
       }),
     [resources, isMap, location.search]
   );
@@ -247,9 +265,30 @@ export function GlobalSearchContent({
     }));
   }, [appThemes]);
 
+  // Advanced Search
+  const advancedSearchSuggestion = useMemo(() => {
+    if (!query.trim() || selectedClusters.length === 0) return;
+    return {
+      id: 'advanced-search-suggestion',
+      subLabel: t('Advanced Search (Beta)'),
+      icon: <Icon icon="mdi:search" />,
+      label: `Search "${query}" with Advanced Search`,
+      onClick: () => {
+        // Set the search query in localStorage for the Advanced Search
+        useLocalStorageState.update(ADVANCED_SEARCH_QUERY_KEY, `metadata.name === "${query}"`);
+
+        const params = new URLSearchParams(history.location.search);
+        history.push(createRouteURL('advancedSearch') + '?' + params.toString());
+      },
+    };
+  }, [query, selectedClusters]);
+
   const allOptions = useMemo(
-    () => [...themeActions, ...clusterItems, ...routes, ...items],
-    [themeActions, clusterItems, routes, items]
+    () =>
+      [...themeActions, ...clusterItems, ...routes, ...items, advancedSearchSuggestion].filter(
+        Boolean
+      ) as SearchResult[],
+    [themeActions, clusterItems, routes, items, advancedSearchSuggestion]
   );
 
   const fuse = useMemo(

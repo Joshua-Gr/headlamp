@@ -14,10 +14,12 @@
  * limitations under the License.
  */
 
+import { KubeBackendTLSPolicy } from '../../lib/k8s/backendTLSPolicy';
 import { KubeGateway } from '../../lib/k8s/gateway';
 import { KubeGatewayClass } from '../../lib/k8s/gatewayClass';
 import { KubeGRPCRoute } from '../../lib/k8s/grpcRoute';
 import { KubeHTTPRoute } from '../../lib/k8s/httpRoute';
+import { KubeReferenceGrant } from '../../lib/k8s/referenceGrant';
 
 export const DEFAULT_GATEWAY: KubeGateway = {
   apiVersion: 'gateway.networking.k8s.io/v1beta1',
@@ -121,5 +123,56 @@ export const DEFAULT_GRPC_ROUTE: KubeGRPCRoute = {
         name: 'envoy-gateway-system-test',
       },
     ],
+  },
+};
+
+export const DEFAULT_REFERENCE_GRANT: KubeReferenceGrant = {
+  apiVersion: 'gateway.networking.k8s.io/v1beta1',
+  kind: 'ReferenceGrant',
+  metadata: {
+    uid: 'abc1234',
+    name: 'example-refgrant',
+    namespace: 'default',
+    creationTimestamp: '2025-06-16T09:18:00Z',
+  },
+  spec: {
+    from: [
+      {
+        group: 'gateway.networking.k8s.io',
+        kind: 'HTTPRoute',
+        namespace: 'default',
+      },
+    ],
+    to: [
+      {
+        group: '',
+        kind: 'Service',
+        name: 'example-service',
+      },
+    ],
+  },
+};
+
+export const DEFAULT_BACKEND_TLS_POLICY: KubeBackendTLSPolicy = {
+  apiVersion: 'gateway.networking.k8s.io/v1alpha3',
+  kind: 'BackendTLSPolicy',
+  metadata: {
+    uid: 'abc1234',
+    name: 'example-policy',
+    namespace: 'default',
+    creationTimestamp: '2025-06-16T09:18:00Z',
+  },
+  spec: {
+    targetRefs: [
+      {
+        group: '',
+        kind: 'Service',
+        name: 'example-service',
+      },
+    ],
+    validation: {
+      hostname: 'example.com',
+      caCertificateRefs: [],
+    },
   },
 };

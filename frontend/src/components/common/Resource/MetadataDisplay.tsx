@@ -81,6 +81,7 @@ export function MetadataDisplay<T extends KubeObject>(props: MetadataDisplayProp
             <>
               <Link
                 routeName={routeName}
+                activeCluster={resource.cluster}
                 params={{ name: ownerRef.name, namespace: resource.metadata.namespace }}
               >
                 {ownerRef.kind}: {ownerRef.name}
@@ -116,7 +117,11 @@ export function MetadataDisplay<T extends KubeObject>(props: MetadataDisplayProp
       {
         name: t('glossary|Namespace'),
         value: resource.metadata.namespace && (
-          <Link routeName={'namespace'} params={{ name: resource.metadata.namespace }}>
+          <Link
+            routeName={'namespace'}
+            params={{ name: resource.metadata.namespace }}
+            activeCluster={resource.cluster}
+          >
             {resource.metadata.namespace}
           </Link>
         ),
@@ -246,7 +251,9 @@ export function MetadataDictGrid(props: MetadataDictGridProps) {
         </IconButton>
       )}
       {/* Limit the size to two entries until the user chooses to expand the whole section */}
-      {keys.slice(0, expanded ? keys.length : defaultNumShown).map(key => makeLabel(key))}
+      {keys.slice(0, expanded ? keys.length : defaultNumShown).map(key => (
+        <React.Fragment key={key}>{makeLabel(key)}</React.Fragment>
+      ))}
     </Box>
   );
 }

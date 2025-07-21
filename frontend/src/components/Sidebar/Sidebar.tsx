@@ -27,7 +27,7 @@ import { useDispatch } from 'react-redux';
 import { useHistory } from 'react-router-dom';
 import { isElectron } from '../../helpers/isElectron';
 import { createRouteURL } from '../../lib/router';
-import { useTypedSelector } from '../../redux/reducers/reducers';
+import { useTypedSelector } from '../../redux/hooks';
 import ActionButton from '../common/ActionButton';
 import CreateButton from '../common/Resource/CreateButton';
 import NavigationTabs from './NavigationTabs';
@@ -371,7 +371,11 @@ export const PureSidebar = memo(
     }, [items]);
 
     return (
-      <Box component="nav" aria-label={t('translation|Navigation')}>
+      <Box
+        component="nav"
+        aria-label={t('translation|Navigation')}
+        sx={{ minHeight: 0, gridColumn: '1 / 2', gridRow: '1 / 3' }}
+      >
         <Drawer
           variant={isTemporaryDrawer ? 'temporary' : 'permanent'}
           PaperProps={{
