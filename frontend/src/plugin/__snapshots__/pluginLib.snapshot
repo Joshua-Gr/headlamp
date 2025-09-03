@@ -471,6 +471,8 @@
   "registerClusterChooser": [Function],
   "registerClusterProviderDialog": [Function],
   "registerClusterProviderMenuItem": [Function],
+  "registerClusterStatus": [Function],
+  "registerCustomCreateProject": [Function],
   "registerDetailsViewHeaderAction": [Function],
   "registerDetailsViewHeaderActionsProcessor": [Function],
   "registerDetailsViewSection": [Function],
@@ -482,6 +484,8 @@
   "registerMapSource": [Function],
   "registerOverviewChartsProcessor": [Function],
   "registerPluginSettings": [Function],
+  "registerProjectDetailsTab": [Function],
+  "registerProjectOverviewSection": [Function],
   "registerResourceTableColumnsProcessor": [Function],
   "registerRoute": [Function],
   "registerRouteFilter": [Function],
@@ -490,4 +494,5 @@
   "registerSidebarEntryFilter": [Function],
   "registerUIPanel": [Function],
   "runCommand": [Function],
+  "useTranslation": [Function],
 }

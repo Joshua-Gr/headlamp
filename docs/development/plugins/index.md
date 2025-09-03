@@ -40,9 +40,8 @@ Comprehensive API documentation covering all available plugin capabilities.
 ### 🚀 [Publishing Plugins](./publishing.md)
 Share your plugins with the community through Artifact Hub.
 
-### 🤖 [AI-Assisted Development](./ai-assisted-development.md)
-Leverage AI tools to accelerate your plugin development process.
-
+### 🌍 [Internationalization](./i18n.md)
+Add support for multiple languages and locales
 
 ## Ready to Start?
 

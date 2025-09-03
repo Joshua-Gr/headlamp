@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -32,7 +33,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -74,8 +74,11 @@ type HeadlampConfig struct {
 	oidcValidatorClientID     string
 	oidcClientSecret          string
 	oidcIdpIssuerURL          string
+	oidcCallbackURL           string
 	oidcValidatorIdpIssuerURL string
 	oidcUseAccessToken        bool
+	oidcSkipTLSVerify         bool
+	oidcCACert                string
 	cache                     cache.Cache[interface{}]
 	multiplexer               *Multiplexer
 	telemetryConfig           cfg.Config
@@ -231,6 +234,12 @@ func baseURLReplace(staticDir string, baseURL string) {
 }
 
 func getOidcCallbackURL(r *http.Request, config *HeadlampConfig) string {
+	// If callback URL is configured, use it
+	if config.oidcCallbackURL != "" {
+		return config.oidcCallbackURL
+	}
+
+	// Otherwise, generate callback URL dynamically
 	urlScheme := r.URL.Scheme
 	if urlScheme == "" {
 		// check proxy headers first
@@ -423,7 +432,9 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	if config.UseInCluster {
 		context, err := kubeconfig.GetInClusterContext(config.oidcIdpIssuerURL,
 			config.oidcClientID, config.oidcClientSecret,
-			strings.Join(config.oidcScopes, ","))
+			strings.Join(config.oidcScopes, ","),
+			config.oidcSkipTLSVerify,
+			config.oidcCACert)
 		if err != nil {
 			logger.Log(logger.LevelError, nil, err, "Failed to get in-cluster context")
 		}
@@ -484,6 +495,22 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	}
 
 	addPluginRoutes(config, r)
+
+	// Setup port forwarding handlers.
+	r.HandleFunc("/clusters/{clusterName}/portforward", func(w http.ResponseWriter, r *http.Request) {
+		portforward.StartPortForward(config.KubeConfigStore, config.cache, w, r)
+	}).Methods("POST")
+
+	r.HandleFunc("/clusters/{clusterName}/portforward", func(w http.ResponseWriter, r *http.Request) {
+		portforward.StopOrDeletePortForward(config.cache, w, r)
+	}).Methods("DELETE")
+
+	r.HandleFunc("/clusters/{clusterName}/portforward/list", func(w http.ResponseWriter, r *http.Request) {
+		portforward.GetPortForwards(config.cache, w, r)
+	})
+	r.HandleFunc("/clusters/{clusterName}/portforward", func(w http.ResponseWriter, r *http.Request) {
+		portforward.GetPortForwardByID(config.cache, w, r)
+	}).Methods("GET")
 
 	config.handleClusterRequests(r)
 
@@ -600,6 +627,9 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	// Configuration
 	r.HandleFunc("/config", config.getConfig).Methods("GET")
 
+	// Auth token management
+	r.HandleFunc("/auth/set-token", config.handleSetToken).Methods("POST")
+
 	// Websocket connections
 	r.HandleFunc("/wsMultiplexer", config.multiplexer.HandleClientWebSocket)
 
@@ -637,6 +667,8 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		ctx = configureTLSContext(ctx, oidcAuthConfig.SkipTLSVerify, oidcAuthConfig.CACert)
 
 		if config.oidcValidatorIdpIssuerURL != "" {
 			ctx = oidc.InsecureIssuerURLContext(ctx, config.oidcValidatorIdpIssuerURL)
@@ -677,24 +709,9 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 		http.Redirect(w, r, oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(codeVerifier),), http.StatusFound)
 	}).Queries("cluster", "{cluster}")
 
-	r.HandleFunc("/portforward", func(w http.ResponseWriter, r *http.Request) {
-		portforward.StartPortForward(config.KubeConfigStore, config.cache, w, r)
-	}).Methods("POST")
-
-	r.HandleFunc("/portforward", func(w http.ResponseWriter, r *http.Request) {
-		portforward.StopOrDeletePortForward(config.cache, w, r)
-	}).Methods("DELETE")
-
-	r.HandleFunc("/portforward/list", func(w http.ResponseWriter, r *http.Request) {
-		portforward.GetPortForwards(config.cache, w, r)
-	})
-
 	r.HandleFunc("/drain-node", config.handleNodeDrain).Methods("POST")
 	r.HandleFunc("/drain-node-status",
 		config.handleNodeDrainStatus).Methods("GET").Queries("cluster", "{cluster}", "nodeName", "{node}")
-	r.HandleFunc("/portforward", func(w http.ResponseWriter, r *http.Request) {
-		portforward.GetPortForwardByID(config.cache, w, r)
-	}).Methods("GET")
 
 	r.HandleFunc("/oidc-callback", func(w http.ResponseWriter, r *http.Request) {
 		state := r.URL.Query().Get("state")
@@ -784,7 +801,10 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 				redirectURL += baseURL + "/"
 			}
 
-			redirectURL += fmt.Sprintf("auth?cluster=%1s&token=%2s", decodedState, rawUserToken)
+			// Set auth cookie
+			auth.SetTokenCookie(w, r, string(decodedState), rawUserToken)
+
+			redirectURL += fmt.Sprintf("auth?cluster=%1s", decodedState)
 			http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 		} else {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -817,29 +837,16 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			"KUBECONFIG", "X-HEADLAMP-USER-ID",
 		})
 		methods := handlers.AllowedMethods([]string{"GET", "POST", "PUT", "HEAD", "DELETE", "PATCH", "OPTIONS"})
-		origins := handlers.AllowedOrigins([]string{"*"})
 
-		return handlers.CORS(headers, methods, origins)(r)
+		return handlers.CORS(
+			headers,
+			methods,
+			handlers.AllowCredentials(),
+			handlers.AllowedOriginValidator(func(s string) bool { return true }),
+		)(r)
 	}
 
 	return r
-}
-
-func parseClusterAndToken(r *http.Request) (string, string) {
-	cluster := ""
-	re := regexp.MustCompile(`^/clusters/([^/]+)/.*`)
-	urlString := r.URL.RequestURI()
-
-	matches := re.FindStringSubmatch(urlString)
-	if len(matches) > 1 {
-		cluster = matches[1]
-	}
-
-	// get token
-	token := r.Header.Get("Authorization")
-	token = strings.TrimPrefix(token, "Bearer ")
-
-	return cluster, token
 }
 
 func getExpiryTime(payload map[string]interface{}) (time.Time, error) {
@@ -874,16 +881,62 @@ func isTokenAboutToExpire(token string) bool {
 	return time.Until(expiryTime) <= JWTExpirationTTL
 }
 
-func refreshAndCacheNewToken(clientID, clientSecret string, cache cache.Cache[interface{}],
+// configureTLSContext configures TLS settings for the HTTP client in the context.
+// If skipTLSVerify is true, TLS verification will be skipped.
+// If caCert is provided, it will be added to the certificate pool for TLS verification.
+func configureTLSContext(ctx context.Context, skipTLSVerify *bool, caCert *string) context.Context {
+	if skipTLSVerify != nil && *skipTLSVerify {
+		tlsSkipTransport := &http.Transport{
+			// the gosec linter is disabled here because we are explicitly requesting to skip TLS verification.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+		ctx = oidc.ClientContext(ctx, &http.Client{Transport: tlsSkipTransport})
+	}
+
+	if caCert != nil {
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM([]byte(*caCert)) {
+			// Log error but continue with original context
+			logger.Log(logger.LevelError, nil,
+				errors.New("failed to append ca cert to pool"), "couldn't add custom cert to context")
+			return ctx
+		}
+
+		// the gosec linter is disabled because gosec promotes using a minVersion of TLS 1.2 or higher.
+		// since we are using a custom CA cert configured by the user, we are not forcing a minVersion.
+		customTransport := &http.Transport{
+			TLSClientConfig: &tls.Config{ //nolint:gosec
+				RootCAs: caCertPool,
+			},
+		}
+
+		ctx = oidc.ClientContext(ctx, &http.Client{Transport: customTransport})
+	}
+
+	return ctx
+}
+
+func refreshAndCacheNewToken(oidcAuthConfig *kubeconfig.OidcConfig,
+	cache cache.Cache[interface{}],
 	tokenType, token, issuerURL string,
 ) (*oauth2.Token, error) {
+	ctx := context.Background()
+	ctx = configureTLSContext(ctx, oidcAuthConfig.SkipTLSVerify, oidcAuthConfig.CACert)
+
 	// get provider
-	provider, err := oidc.NewProvider(context.Background(), issuerURL)
+	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("getting provider: %v", err)
 	}
 	// get refresh token
-	newToken, err := getNewToken(clientID, clientSecret, cache, tokenType, token, provider.Endpoint().TokenURL)
+	newToken, err := getNewToken(
+		oidcAuthConfig.ClientID,
+		oidcAuthConfig.ClientSecret,
+		cache,
+		tokenType,
+		token,
+		provider.Endpoint().TokenURL,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("refreshing token: %v", err)
 	}
@@ -957,7 +1010,7 @@ func cacheRefreshedToken(token *oauth2.Token, tokenType string, oldToken string,
 
 func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfig,
 	cache cache.Cache[interface{}], token string,
-	w http.ResponseWriter, cluster string, span trace.Span, ctx context.Context,
+	w http.ResponseWriter, r *http.Request, cluster string, span trace.Span, ctx context.Context,
 ) {
 	// The token type to use
 	tokenType := "id_token"
@@ -966,8 +1019,7 @@ func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfi
 	}
 
 	newToken, err := refreshAndCacheNewToken(
-		oidcAuthConfig.ClientID,
-		oidcAuthConfig.ClientSecret,
+		oidcAuthConfig,
 		cache,
 		tokenType,
 		token,
@@ -979,11 +1031,15 @@ func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfi
 		c.telemetryHandler.RecordError(span, err, "Token refresh failed")
 		c.telemetryHandler.RecordErrorCount(ctx, attribute.String("error", "token_refresh_failure"))
 	} else if newToken != nil {
+		var newTokenString string
 		if c.oidcUseAccessToken {
-			w.Header().Set("X-Authorization", newToken.Extra("access_token").(string))
+			newTokenString = newToken.Extra("access_token").(string)
 		} else {
-			w.Header().Set("X-Authorization", newToken.Extra("id_token").(string))
+			newTokenString = newToken.Extra("id_token").(string)
 		}
+
+		// Set refreshed token in cookie
+		auth.SetTokenCookie(w, r, cluster, newTokenString)
 
 		c.telemetryHandler.RecordEvent(span, "Token refreshed successfully")
 	}
@@ -1088,7 +1144,7 @@ func (c *HeadlampConfig) OIDCTokenRefreshMiddleware(next http.Handler) http.Hand
 		}
 
 		// parse cluster and token
-		cluster, token := parseClusterAndToken(r)
+		cluster, token := auth.ParseClusterAndToken(r)
 		if c.shouldBypassOIDCRefresh(cluster, token, w, r, span, ctx, start, next) {
 			return
 		}
@@ -1117,7 +1173,7 @@ func (c *HeadlampConfig) OIDCTokenRefreshMiddleware(next http.Handler) http.Hand
 		}
 
 		// refresh and cache new token
-		c.refreshAndSetToken(oidcAuthConfig, c.cache, token, w, cluster, span, ctx)
+		c.refreshAndSetToken(oidcAuthConfig, c.cache, token, w, r, cluster, span, ctx)
 
 		next.ServeHTTP(w, r)
 		c.telemetryHandler.RecordDuration(ctx, start,
@@ -1362,12 +1418,8 @@ func (c *HeadlampConfig) handleError(w http.ResponseWriter, ctx context.Context,
 	http.Error(w, err.Error(), status)
 }
 
-// handleClusterAPI handles cluster API requests. It is responsible for
-// all the requests made to /clusters/{clusterName}/{api:.*} endpoint.
-// It parses the request and creates a proxy request to the cluster.
-// That proxy is saved in the cache with the context key.
-func handleClusterAPI(c *HeadlampConfig, router *mux.Router) { //nolint:funlen
-	router.PathPrefix("/clusters/{clusterName}/{api:.*}").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func clusterRequestHandler(c *HeadlampConfig) http.Handler { //nolint:funlen
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ctx := r.Context()
 
@@ -1420,6 +1472,11 @@ func handleClusterAPI(c *HeadlampConfig, router *mux.Router) { //nolint:funlen
 		r.URL.Path = mux.Vars(r)["api"]
 		r.URL.Scheme = clusterURL.Scheme
 
+		token, err := auth.GetTokenFromCookie(r, mux.Vars(r)["clusterName"])
+		if err == nil && token != "" {
+			r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		}
+
 		// Process WebSocket protocol headers if present
 		processWebSocketProtocolHeader(r)
 		plugins.HandlePluginReload(c.cache, w)
@@ -1437,6 +1494,21 @@ func handleClusterAPI(c *HeadlampConfig, router *mux.Router) { //nolint:funlen
 			c.telemetryHandler.RecordEvent(span, "Cluster API request completed")
 		}
 	})
+}
+
+// handleClusterAPI handles cluster API requests. It is responsible for
+// all the requests made to /clusters/{clusterName}/{api:.*} endpoint.
+// It parses the request and creates a proxy request to the cluster.
+// That proxy is saved in the cache with the context key.
+func handleClusterAPI(c *HeadlampConfig, router *mux.Router) {
+	router.HandleFunc("/clusters/{clusterName}/set-token", c.handleSetToken).Methods("POST")
+
+	handler := clusterRequestHandler(c)
+	if c.CacheEnabled {
+		handler = CacheMiddleWare(c)(handler)
+	}
+
+	router.PathPrefix("/clusters/{clusterName}/{api:.*}").Handler(handler)
 }
 
 func recordRequestCompletion(c *HeadlampConfig, ctx context.Context,
@@ -1536,8 +1608,6 @@ func (c *HeadlampConfig) getClusters() []Cluster {
 	}
 
 	for _, context := range contexts {
-		context := context
-
 		if context.Error != "" {
 			clusters = append(clusters, Cluster{
 				Name:  context.Name,
@@ -1592,8 +1662,6 @@ func parseCustomNameClusters(contexts []kubeconfig.Context) ([]Cluster, []error)
 	var setupErrors []error
 
 	for _, context := range contexts {
-		context := context
-
 		info := context.KubeContext.Extensions["headlamp_info"]
 		if info != nil {
 			// Convert the runtime.Unknown object to a byte slice
@@ -2054,8 +2122,6 @@ func (c *HeadlampConfig) updateCustomContextToCache(config *api.Config, clusterN
 	}
 
 	for _, context := range contexts {
-		context := context
-
 		// Remove the old context from the store
 		if err := c.KubeConfigStore.RemoveContext(clusterName); err != nil {
 			logger.Log(logger.LevelError, nil, err, "Removing context from the store")
@@ -2439,4 +2505,33 @@ func (c *HeadlampConfig) handleNodeDrainStatus(w http.ResponseWriter, r *http.Re
 	c.telemetryHandler.RecordDuration(ctx, start, attribute.String("api.route", "handleNodeDrainStatus"))
 	logger.Log(logger.LevelInfo, map[string]string{"duration_ms": fmt.Sprintf("%d", time.Since(start).Milliseconds())},
 		nil, "handleNodeDrainStatus completed")
+}
+
+// handlerSetToken sets the authentication token in a cookie.
+// If the token is an empty string, the cookie is cleared.
+func (c *HeadlampConfig) handleSetToken(w http.ResponseWriter, r *http.Request) {
+	cluster := mux.Vars(r)["clusterName"]
+
+	var req struct {
+		Token string `json:"token"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate cluster name is provided
+	if cluster == "" {
+		http.Error(w, "Cluster name is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Token == "" {
+		auth.ClearTokenCookie(w, r, cluster)
+	} else {
+		auth.SetTokenCookie(w, r, cluster, req.Token)
+	}
+
+	w.WriteHeader(http.StatusOK)
 }

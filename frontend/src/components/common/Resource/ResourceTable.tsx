@@ -135,6 +135,7 @@ export interface ResourceTableProps<RowItem> {
 export interface ResourceTableFromResourceClassProps<KubeClass extends KubeObjectClass>
   extends Omit<ResourceTableProps<InstanceType<KubeClass>>, 'data'> {
   resourceClass: KubeClass;
+  namespaces?: string[];
 }
 
 export default function ResourceTable<KubeClass extends KubeObjectClass>(
@@ -155,7 +156,10 @@ function TableFromResourceClass<KubeClass extends KubeObjectClass>(
   props: ResourceTableFromResourceClassProps<KubeClass>
 ) {
   const { resourceClass, id, ...otherProps } = props;
-  const { items, errors } = resourceClass.useList({ namespace: useNamespaces() });
+  const selectedNamespaces = useNamespaces();
+  const { items, errors } = resourceClass.useList({
+    namespace: props.namespaces ?? selectedNamespaces,
+  });
 
   // throttle the update of the table to once per second
   const throttledItems = useThrottle(items, 1000);
@@ -412,7 +416,7 @@ function ResourceTableContent<RowItem extends KubeObject>(props: ResourceTablePr
               id: 'namespace',
               header: t('glossary|Namespace'),
               gridTemplate: 'auto',
-              accessorFn: (item: RowItem) => item.getNamespace() ?? '',
+              accessorFn: (item: RowItem) => item.getNamespace() ?? '-',
               filterVariant: 'multi-select',
               Cell: ({ row }: { row: MRT_Row<RowItem> }) =>
                 row.original?.getNamespace() ? (

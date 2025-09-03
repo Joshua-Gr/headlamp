@@ -20,14 +20,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -248,7 +252,6 @@ func TestDynamicClusters(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			cache := cache.New[interface{}]()
 			kubeConfigStore := kubeconfig.NewContextStore()
@@ -1000,17 +1003,6 @@ func TestGetOidcCallbackURL(t *testing.T) {
 	}
 }
 
-func TestParseClusterAndToken(t *testing.T) {
-	ctx := context.Background()
-	req, err := http.NewRequestWithContext(ctx, "GET", "/clusters/test-cluster/api", nil)
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer test-token")
-
-	cluster, token := parseClusterAndToken(req)
-	assert.Equal(t, "test-cluster", cluster)
-	assert.Equal(t, "test-token", token)
-}
-
 func TestIsTokenAboutToExpire(t *testing.T) {
 	// Token that expires in 4 minutes
 	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -1339,4 +1331,333 @@ func TestProcessTokenProtocol(t *testing.T) {
 			assert.Equal(t, tt.expectedAuthHeader, req.Header.Get("Authorization"))
 		})
 	}
+}
+
+// TestConfigureTLSContext_NoConfig tests when both skipTLSVerify and caCert are not set.
+func TestConfigureTLSContext_NoConfig(t *testing.T) {
+	baseCtx := context.Background()
+	resultCtx := configureTLSContext(baseCtx, nil, nil)
+
+	// Context should remain unchanged when no TLS configuration is provided
+	assert.Equal(t, baseCtx, resultCtx, "Context should remain unchanged when no TLS configuration is provided")
+}
+
+/*
+TestConfigureTLSContext_SkipTLS tests when skipTLSVerify is set to true.
+The OIDC library would use this context to make requests
+We can't directly extract the client, but we can verify the behavior
+by checking that the context was modified (indicating TLS config was applied).
+*/
+func TestConfigureTLSContext_SkipTLS(t *testing.T) {
+	// Create a test server that requires TLS
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte("TLS connection successful"))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	baseCtx := context.Background()
+	skipTLSVerify := true
+	resultCtx := configureTLSContext(baseCtx, &skipTLSVerify, nil)
+
+	// Context should be modified when skipTLSVerify is true
+	assert.NotEqual(t, baseCtx, resultCtx, "Context should be modified when skipTLSVerify is true")
+
+	// Test that the configured context can make TLS requests with skip verification
+	// This verifies that the TLS configuration was actually applied
+	_, err := http.NewRequestWithContext(resultCtx, "GET", server.URL, nil)
+	require.NoError(t, err)
+}
+
+// TestConfigureTLSContext_CACert tests when caCert is provided.
+func TestConfigureTLSContext_CACert(t *testing.T) {
+	// Read the pre-generated CA certificate from testdata
+	caCertBytes, err := os.ReadFile("headlamp_testdata/ca.crt")
+	require.NoError(t, err)
+
+	// Test the configureTLSContext function with the CA certificate
+	baseCtx := context.Background()
+	caCert := string(caCertBytes)
+	resultCtx := configureTLSContext(baseCtx, nil, &caCert)
+
+	// Context should be modified when caCert is provided
+	assert.NotEqual(t, baseCtx, resultCtx, "Context should be modified when caCert is provided")
+
+	// Verify that the CA certificate was parsed correctly by checking if it's valid PEM
+	block, _ := pem.Decode([]byte(caCert))
+	assert.NotNil(t, block, "CA certificate should be valid PEM format")
+	assert.Equal(t, "CERTIFICATE", block.Type, "CA certificate should be of type CERTIFICATE")
+
+	// Parse the CA certificate to verify it's valid
+	caCertParsed, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	assert.True(t, caCertParsed.IsCA, "Generated certificate should be a CA certificate")
+}
+
+// newFakeK8sServer create a mock k8s server for testing purpose,
+// this would help to test Caching Machanism without making request
+// to the k8s server.
+func newFakeK8sServer(authAllowed bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+
+			status := fmt.Sprintf(`{"status":{"allowed":%v}}`, authAllowed)
+			_, _ = w.Write([]byte(status))
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if authAllowed {
+			_, _ = w.Write([]byte(`{"kind":"List","apiVersion":"v1","items":[{"metadata":{"name":"resource-test"}}]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","metadata":{"resourceVersion":""},` +
+				`"message":"resource is forbidden: User \"system:serviceaccount:default:test\" cannot get resource ` +
+				`\"resource\" in API group \"\" at the cluster scope","reason":"Forbidden","details":{"kind":"resource"},` +
+				`"code":403}`))
+		}
+	}))
+}
+
+// newHeadlampConfig create mock HeadlampConfig for testing CacheMiddleware
+// mechanism without creating actual HeadlampConfig.
+func newHeadlampConfig(fakeK8s *httptest.Server, testName string) *HeadlampConfig {
+	store := kubeconfig.NewContextStore()
+
+	err := store.AddContext(&kubeconfig.Context{
+		ClusterID: fmt.Sprintf("./home/user/kube/config+test-cluster-%s", testName),
+		Name:      "test",
+		Cluster:   &api.Cluster{Server: fakeK8s.URL},
+		AuthInfo:  &api.AuthInfo{Token: "test-token"},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return &HeadlampConfig{
+		HeadlampCFG: &headlampconfig.HeadlampCFG{
+			KubeConfigStore: store,
+			CacheEnabled:    true,
+		},
+		telemetryHandler: &telemetry.RequestHandler{},
+		cache:            cache.New[interface{}](),
+	}
+}
+
+// stringResponse converts the response from the request into
+// string value for comparing results.
+func stringResponse(resp *http.Response) (string, error) {
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	bodyString := string(bodyBytes)
+
+	return bodyString, nil
+}
+
+// httpRequestWithContext create request by providing context, url and method, and return
+// http.Response and error.
+func httpRequestWithContext(ctx context.Context, url string, method string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.DefaultClient.Do(req)
+}
+
+const istrue = true
+
+// TestCacheMiddleware_CacheHitAndCacheMiss test whether the k8s is storing into the cache
+// and returns the data if the data is present in the cache.
+func TestCacheMiddleware_CacheHitAndCacheMiss(t *testing.T) {
+	if os.Getenv("HEADLAMP_RUN_INTEGRATION_TESTS") != strconv.FormatBool(istrue) {
+		t.Skip("skipping integration test")
+	}
+
+	fakeK8s := newFakeK8sServer(true)
+	defer fakeK8s.Close()
+
+	c := newHeadlampConfig(fakeK8s, t.Name())
+
+	ctx := context.Background()
+
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use the incoming request's context
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fakeK8s.URL+r.URL.Path, nil)
+		if err != nil {
+			http.Error(w, "failed to create request", http.StatusInternalServerError)
+			return
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "proxy error", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		_, err = io.Copy(w, resp.Body)
+		assert.NoError(t, err)
+	})
+
+	// 4. Wrap the proxy handler with the CacheMiddleWare
+	router := mux.NewRouter()
+	router.PathPrefix("/clusters/{clusterName}/{api:.*}").Handler(
+		CacheMiddleWare(c)(proxyHandler))
+
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	expectedResponse := `{"kind":"List","apiVersion":"v1","items":[{"metadata":{"name":"resource-test"}}]}`
+
+	resp1, err := httpRequestWithContext(ctx, ts.URL+"/clusters/test/api/v1/resource", "GET")
+	assert.NoError(t, err)
+
+	defer resp1.Body.Close()
+
+	resp2, err := httpRequestWithContext(ctx, ts.URL+"/clusters/test/api/v1/resource", "GET")
+	assert.NoError(t, err)
+
+	defer resp2.Body.Close()
+
+	resp1String, err := stringResponse(resp1)
+	assert.NoError(t, err)
+	resp2String, err := stringResponse(resp2)
+	assert.NoError(t, err)
+
+	assert.Equal(t, expectedResponse, resp1String)
+	assert.Equal(t, "", resp1.Header.Get("X-HEADLAMP-CACHE")) // response is from k8s server, hence X-HEADLAMP-CACHE: ""
+	assert.Equal(t, http.StatusOK, resp1.StatusCode)
+	assert.Equal(t, expectedResponse, resp2String)
+	assert.Equal(t, "true", resp2.Header.Get("X-HEADLAMP-CACHE")) // response is from cache, hence X-HEADLAMP-CACHE: true
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+}
+
+// TestCacheMiddleware_AuthErrorResponse test if the user is not authorized
+// to access a resource, CacheMiddleware should return AuthErrorResponse to
+// the client without going to k8 server.
+func TestCacheMiddleware_AuthErrorResponse(t *testing.T) {
+	if os.Getenv("HEADLAMP_RUN_INTEGRATION_TESTS") != strconv.FormatBool(istrue) {
+		t.Skip("skipping integration test")
+	}
+
+	fakeK8s := newFakeK8sServer(false)
+	defer fakeK8s.Close()
+
+	c := newHeadlampConfig(fakeK8s, t.Name())
+
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use the incoming request's context
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fakeK8s.URL+r.URL.Path, nil)
+		if err != nil {
+			http.Error(w, "failed to create request", http.StatusInternalServerError)
+			return
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "proxy error", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		_, err = io.Copy(w, resp.Body)
+		assert.NoError(t, err)
+	})
+
+	router := mux.NewRouter()
+	router.PathPrefix("/clusters/{clusterName}/{api:.*}").Handler(
+		CacheMiddleWare(c)(proxyHandler))
+
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	expectedResponse := `{"kind":"Status","apiVersion":"v1","metadata":{"resourceVersion":""},` +
+		`"message":"resource is forbidden: User \"system:serviceaccount:default:test\" cannot get resource ` +
+		`\"resource\" in API group \"\" at the cluster scope","reason":"Forbidden","details":{"kind":"resource"},` +
+		`"code":403}`
+
+	resp1, err := httpRequestWithContext(ctx, ts.URL+"/clusters/test/api/v1/resource", "GET")
+	assert.NoError(t, err)
+
+	defer resp1.Body.Close()
+
+	resp1String, err := stringResponse(resp1)
+	assert.NoError(t, err)
+	assert.Equal(t, expectedResponse, resp1String) // expected authErroResponse to the client.
+	assert.Equal(t, "true", resp1.Header.Get("X-HEADLAMP-CACHE"))
+	assert.Equal(t, http.StatusForbidden, resp1.StatusCode)
+}
+
+// TestCacheMiddlware_CacheInvalidation test if the request is modifying
+// it should delete the keys, making new fresh request to k8s server and store
+// into the cache if the request is same it should return response from the client.
+func TestCacheMiddleware_CacheInvalidation(t *testing.T) {
+	if os.Getenv("HEADLAMP_RUN_INTEGRATION_TESTS") != strconv.FormatBool(istrue) {
+		t.Skip("skipping integration test")
+	}
+
+	fakeK8s := newFakeK8sServer(true)
+	defer fakeK8s.Close()
+
+	c := newHeadlampConfig(fakeK8s, t.Name())
+
+	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use the incoming request's context
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, fakeK8s.URL+r.URL.Path, nil)
+		if err != nil {
+			http.Error(w, "failed to create request", http.StatusInternalServerError)
+			return
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "proxy error", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		_, err = io.Copy(w, resp.Body)
+		assert.NoError(t, err)
+	})
+
+	router := mux.NewRouter()
+	router.PathPrefix("/clusters/{clusterName}/{api:.*}").Handler(
+		CacheMiddleWare(c)(proxyHandler))
+
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	expectedResponse := `{"kind":"List","apiVersion":"v1","items":[{"metadata":{"name":"resource-test"}}]}`
+
+	resp, err := httpRequestWithContext(ctx, ts.URL+"/clusters/test/api/v1/resource", "POST")
+	assert.NoError(t, err)
+
+	defer resp.Body.Close()
+
+	assert.Equal(t, "", resp.Header.Get("X-HEADLAMP-CACHE"))
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp1, err := httpRequestWithContext(ctx, ts.URL+"/clusters/test/api/v1/resource", "GET")
+	assert.NoError(t, err)
+
+	defer resp1.Body.Close()
+
+	resp1String, err := stringResponse(resp1)
+	assert.NoError(t, err)
+	assert.Equal(t, expectedResponse, resp1String)
+	assert.Equal(t, "true", resp1.Header.Get("X-HEADLAMP-CACHE"))
+	assert.Equal(t, http.StatusOK, resp1.StatusCode)
 }

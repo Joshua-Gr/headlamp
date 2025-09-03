@@ -290,6 +290,9 @@ export const PureSidebar = memo(
 
     const adjustedDrawerWidth = largeSideBarOpen ? drawerWidth : closedWidth;
 
+    // Remove items from tab order when the sidebar is collapsed.
+    const tabIndex = largeSideBarOpen ? undefined : -1;
+
     /**
      * For closing the sidebar if temporaryDrawer on mobile.
      */
@@ -316,6 +319,7 @@ export const PureSidebar = memo(
           direction="column"
           justifyContent="space-between"
           wrap="nowrap"
+          aria-hidden={!largeSideBarOpen}
         >
           <Grid item>
             <List
@@ -328,6 +332,7 @@ export const PureSidebar = memo(
                   isSelected={item.isSelected}
                   fullWidth={largeSideBarOpen}
                   search={search}
+                  tabIndex={tabIndex}
                   {...item}
                 />
               ))}
@@ -431,7 +436,8 @@ export const PureSidebar = memo(
 );
 
 export function useSidebarItem(
-  sidebarDesc: string | null | { item: string | null; sidebar?: string }
+  sidebarDesc: string | null | { item: string | null; sidebar?: string },
+  computedMatch: any
 ) {
   let itemName: string | null = null;
   let sidebar: DefaultSidebars | string | null = DefaultSidebars.IN_CLUSTER;
@@ -444,6 +450,9 @@ export function useSidebarItem(
     if (!!sidebarDesc.sidebar) {
       sidebar = sidebarDesc.sidebar || DefaultSidebars.IN_CLUSTER;
     }
+  }
+  if (itemName === 'customresources' && sidebar === DefaultSidebars.IN_CLUSTER) {
+    itemName = computedMatch?.params?.crd ?? itemName;
   }
 
   const dispatch = useDispatch();

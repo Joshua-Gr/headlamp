@@ -40,6 +40,7 @@ import { themeSlice } from '../components/App/themeSlice';
 import * as CommonComponents from '../components/common';
 import { getAppUrl } from '../helpers/getAppUrl';
 import { isElectron } from '../helpers/isElectron';
+import i18next from '../i18n/config';
 import * as K8s from '../lib/k8s';
 import * as ApiProxy from '../lib/k8s/apiProxy';
 import * as Crd from '../lib/k8s/crd';
@@ -49,6 +50,8 @@ import * as Utils from '../lib/util';
 import { eventAction, HeadlampEventType } from '../redux/headlampEventSlice';
 import store from '../redux/stores/store';
 import { Headlamp, Plugin } from './lib';
+import { changePluginLanguage, initializePluginI18n } from './pluginI18n';
+import { useTranslation } from './pluginI18n';
 import { PluginInfo } from './pluginsSlice';
 import Registry, * as registryToExport from './registry';
 import { getInfoForRunningPlugins, identifyPackages, runPlugin, runPluginProps } from './runPlugin';
@@ -94,6 +97,7 @@ window.pluginLib = {
   Notification,
   Headlamp,
   Plugin,
+  useTranslation,
   ...registryToExport,
 };
 
@@ -105,23 +109,9 @@ window.pluginLib.MuiCore = window.pluginLib.MuiMaterial;
 window.plugins = {};
 
 /**
- * Load plugins in the frontend/src/plugin/plugins/ folder.
- *
- * Plugins can be developed inside the headlamp repo.
- * Move them out of the repo to an external location when they are ready.
- *
- * @see Plugin
- */
-function loadDevPlugins() {
-  import.meta.glob(['./plugins/*.index.{js,ts,tsx}'], { eager: true });
-}
-
-/**
  * Load external, then local plugins. Then initialize() them in order with a Registry.
  */
 export async function initializePlugins() {
-  await loadDevPlugins();
-
   // Initialize every plugin in the order they were loaded.
   return new Promise(resolve => {
     for (const pluginName of Object.keys(window.plugins)) {
@@ -292,6 +282,46 @@ function handlePluginRunError(error: unknown, packageName: string, packageVersio
 }
 
 /**
+ * Retry with exponential backoff starting at 50ms, doubling each time and capped at 1000ms.
+ * Retries continue until the total accumulated wait reaches 30 seconds.
+ *
+ * @param url The URL to fetch.
+ * @param maxTotalWaitMs Maximum total wait time across retries (default 30000ms).
+ * @param baseDelayMs Initial delay before first retry (default 50ms).
+ * @param maxDelayMs Maximum delay per retry (default 1000ms).
+ * @returns A promise that resolves to the response of the fetch request.
+ */
+async function fetchWithRetry(
+  url: string,
+  maxTotalWaitMs = 30000,
+  baseDelayMs = 50,
+  maxDelayMs = 1000
+): Promise<Response> {
+  let attempt = 0;
+  let totalSlept = 0;
+  let lastErr: unknown;
+
+  while (totalSlept < maxTotalWaitMs) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP error: ${resp.status}`);
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      const remaining = maxTotalWaitMs - totalSlept;
+      if (remaining <= 0) break;
+
+      const wait = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs, remaining);
+      attempt++;
+      await new Promise(res => setTimeout(res, wait));
+      totalSlept += wait;
+    }
+  }
+
+  throw lastErr ?? new Error('Fetch failed after retries');
+}
+
+/**
  * Get the list of plugins,
  *   download all the plugin source,
  *   download all the plugin package.json files,
@@ -313,7 +343,9 @@ export async function fetchAndExecutePlugins(
 ) {
   const permissionSecretsPromise = permissionSecretsFromApp();
 
-  const pluginPaths = (await fetch(`${getAppUrl()}plugins`).then(resp => resp.json())) as string[];
+  const pluginPaths = (await fetchWithRetry(`${getAppUrl()}plugins`).then(resp =>
+    resp.json()
+  )) as string[];
 
   const sourcesPromise = Promise.all(
     pluginPaths.map(path => fetch(`${getAppUrl()}${path}/main.js`).then(resp => resp.text()))
@@ -470,7 +502,28 @@ export async function fetchAndExecutePlugins(
   });
 
   infoForRunningPlugins.forEach(runPluginInner);
+
+  // Initialize plugin i18n after plugins are loaded
+  await initializePluginsI18n(packageInfos, pluginPaths);
+
   await afterPluginsRun(pluginsLoaded);
+}
+
+/**
+ * Initialize i18n for all plugins that have i18n configuration
+ */
+async function initializePluginsI18n(packageInfos: PluginInfo[], pluginPaths: string[]) {
+  for (let i = 0; i < packageInfos.length; i++) {
+    const packageInfo = packageInfos[i];
+    const pluginPath = pluginPaths[i];
+
+    await initializePluginI18n(packageInfo.name, packageInfo, pluginPath);
+  }
+
+  // Set up language change synchronization
+  i18next.on('languageChanged', language => {
+    changePluginLanguage(language);
+  });
 }
 
 /**
