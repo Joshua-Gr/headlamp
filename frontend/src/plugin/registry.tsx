@@ -40,7 +40,7 @@ import { setSidebarItem, setSidebarItemFilter } from '../components/Sidebar/side
 import { getHeadlampAPIHeaders } from '../helpers/getHeadlampAPIHeaders';
 import { AppTheme } from '../lib/AppTheme';
 import { KubeObject } from '../lib/k8s/KubeObject';
-import { Route } from '../lib/router';
+import type { Route } from '../lib/router/Route';
 import {
   addDetailsViewHeaderActionsProcessor,
   AppBarAction,
@@ -96,8 +96,10 @@ import {
   addDetailsTab,
   addOverviewSection,
   CustomCreateProject,
+  ProjectDeleteButton,
   ProjectDetailsTab,
   ProjectOverviewSection,
+  setProjectDeleteButton,
 } from '../redux/projectsSlice';
 import { setRoute, setRouteFilter } from '../redux/routesSlice';
 import store from '../redux/stores/store';
@@ -1074,6 +1076,7 @@ export function registerCustomCreateProject(customCreateProject: CustomCreatePro
  * @param projectDetailsTab.label - Display label for the tab
  * @param projectDetailsTab.icon - Display icon for the tab
  * @param projectDetailsTab.component - React component to render in the tab content
+ * @param projectDetailsTab.isEnabled - Optional function to determine if tab is displayed
  *
  * @example
  * ```tsx
@@ -1110,6 +1113,16 @@ export function registerProjectOverviewSection(projectOverviewSection: ProjectOv
   store.dispatch(addOverviewSection(projectOverviewSection));
 }
 
+/**
+ * Override default project delete button
+ *
+ * @param projectDeleteButton.component - React component for custom delete button
+ * @param projectDeleteButton.isEnabled - Optional function to determine if button is enabled
+ */
+export function registerProjectDeleteButton(projectDeleteButton: ProjectDeleteButton) {
+  store.dispatch(setProjectDeleteButton(projectDeleteButton));
+}
+
 export {
   DefaultAppBarAction,
   DefaultDetailsViewSection,
@@ -1118,3 +1131,5 @@ export {
   PluginManager,
   ConfigStore,
 };
+
+export type { CallbackActionOptions };

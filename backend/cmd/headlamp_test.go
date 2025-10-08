@@ -23,7 +23,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +31,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -50,79 +48,8 @@ import (
 )
 
 const (
-	staticTestPath = "headlamp_testdata/static_files/"
-	minikubeName   = "minikube"
+	minikubeName = "minikube"
 )
-
-// Is supposed to return the index.html if there is no static file.
-func TestSpaHandlerMissing(t *testing.T) {
-	req, err := http.NewRequest("GET", "/headlampxxx", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	handler := spaHandler{staticPath: staticTestPath, indexPath: "index.html", baseURL: "/headlamp"}
-	handler.ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	indexExpected := "The index."
-
-	if !strings.HasPrefix(rr.Body.String(), indexExpected) {
-		t.Errorf("handler returned unexpected body: got :%v: want :%v:",
-			rr.Body.String(), indexExpected)
-	}
-}
-
-// Works with a baseURL to get the index.html.
-func TestSpaHandlerBaseURL(t *testing.T) {
-	req, err := http.NewRequest("GET", "/headlamp/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	handler := spaHandler{staticPath: staticTestPath, indexPath: "index.html", baseURL: "/headlamp"}
-	handler.ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	indexExpected := "The index."
-	if !strings.HasPrefix(rr.Body.String(), indexExpected) {
-		t.Errorf("handler returned unexpected body: got :%v: want :%v:",
-			rr.Body.String(), indexExpected)
-	}
-}
-
-// Works with a baseURL to get other files.
-func TestSpaHandlerOtherFiles(t *testing.T) {
-	req, err := http.NewRequest("GET", "/headlamp/example.css", nil) //nolint:noctx
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	handler := spaHandler{staticPath: staticTestPath, indexPath: "index.html", baseURL: "/headlamp"}
-	handler.ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-
-	expectedCSS := ".somecss"
-	if !strings.HasPrefix(rr.Body.String(), expectedCSS) {
-		t.Errorf("handler returned unexpected body: got :%v: want :%v:",
-			rr.Body.String(), expectedCSS)
-	}
-}
 
 func makeJSONReq(method, url string, jsonObj interface{}) (*http.Request, error) {
 	var jsonBytes []byte = nil
@@ -841,35 +768,6 @@ func TestFileExists(t *testing.T) {
 		"fileExists() should return false for directory")
 }
 
-func TestCopyReplace(t *testing.T) {
-	// Create temporary source and destination files
-	srcFile, err := os.CreateTemp("", "src_file_*")
-	require.NoError(t, err)
-
-	defer os.Remove(srcFile.Name())
-
-	dstFile, err := os.CreateTemp("", "dst_file_*")
-	require.NoError(t, err)
-
-	defer os.Remove(dstFile.Name())
-
-	// Write test content to source file
-	_, err = srcFile.WriteString("Hello, World! This is a test.")
-	require.NoError(t, err)
-
-	srcFile.Close()
-
-	// Test successful copy and replace
-	copyReplace(srcFile.Name(), dstFile.Name(),
-		[]byte("Hello"), []byte("Hi"),
-		[]byte("test"), []byte("example"))
-
-	dstContent, err := os.ReadFile(dstFile.Name())
-	require.NoError(t, err)
-
-	assert.Equal(t, "Hi, World! This is a example.", string(dstContent), "copyReplace() should correctly replace content")
-}
-
 //nolint:funlen
 func TestBaseURLReplace(t *testing.T) {
 	// Create a temporary directory for testing
@@ -882,7 +780,7 @@ func TestBaseURLReplace(t *testing.T) {
 	indexContent := []byte(`<!DOCTYPE html>
 <html>
 <head>
-    <script>var headlampBaseUrl = './';</script>
+    <script>var headlampBaseUrl = __baseUrl__;</script>
     <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -946,6 +844,36 @@ func TestBaseURLReplace(t *testing.T) {
 	}
 }
 
+func TestBaseURLReplaceWithCurrentIndexHTMLContentAndRSPackBuild(t *testing.T) {
+	// This is the current contents of index.html given the recent changes to support both rsbuild and webpack
+	// after the front-end is built, one of the BASE_URL variables will have been replaced with string contents
+	// depending on which build system was used. In either case though, if the server knows the base URL,
+	// we want to ensure it is used, so headlampBaseUrl will be forced to the value we want
+	output := makeBaseURLReplacements([]byte(`
+<!DOCTYPE html>
+<html>
+<head>
+    <script>
+        __baseUrl__ = '%BASE_URL%<%= BASE_URL %>'.replace('%BASE_' + 'URL%', '').replace('<' + '%= BASE_URL %>', '');
+        headlampBaseUrl = __baseUrl__;
+    </script>
+</head>
+</html>
+`), "/headlamp")
+
+	assert.Equal(t, string(output), `
+<!DOCTYPE html>
+<html>
+<head>
+    <script>
+        __baseUrl__ = '%BASE_URL%<%= BASE_URL %>'.replace('%BASE_' + 'URL%', '').replace('<' + '%= BASE_URL %>', '');
+        headlampBaseUrl = '/headlamp';
+    </script>
+</head>
+</html>
+`)
+}
+
 func TestGetOidcCallbackURL(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1001,23 +929,6 @@ func TestGetOidcCallbackURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestIsTokenAboutToExpire(t *testing.T) {
-	// Token that expires in 4 minutes
-	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-	originalPayload := "eyJleHAiOjE2MTIzNjE2MDB9"
-	signature := ".7vl9iBWGDQdXUTbEsqFHiHoaNWxKn4UwLhO9QDhXrpM"
-
-	token := header + originalPayload + signature
-	result := isTokenAboutToExpire(token)
-	assert.True(t, result)
-
-	modifiedPayload := strings.Replace(originalPayload, "J", "-", 1)
-
-	token = header + modifiedPayload + signature
-	result = isTokenAboutToExpire(token)
-	assert.False(t, result, "Expected to return false when payload decoding fails due to URL-safe characters")
 }
 
 func TestOIDCTokenRefreshMiddleware(t *testing.T) {
@@ -1104,6 +1015,51 @@ func TestStartHeadlampServer(t *testing.T) {
 	if resp != nil {
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "Server should return OK status")
 	}
+}
+
+func TestStartHeadlampServerTLS(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "headlamp-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	cfg := &HeadlampConfig{
+		HeadlampCFG: &headlampconfig.HeadlampCFG{
+			Port:            8185,
+			PluginDir:       tempDir,
+			KubeConfigStore: kubeconfig.NewContextStore(),
+			TLSCertPath:     "headlamp_testdata/headlamp.crt",
+			TLSKeyPath:      "headlamp_testdata/headlamp.key",
+		},
+		cache:           cache.New[interface{}](),
+		telemetryConfig: GetDefaultTestTelemetryConfig(),
+	}
+
+	go StartHeadlampServer(cfg)
+	time.Sleep(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pool, err := x509.SystemCertPool()
+	if pool == nil {
+		pool = x509.NewCertPool()
+	}
+
+	require.NoError(t, err)
+	crt, err := os.ReadFile("headlamp_testdata/headlamp.crt")
+	require.NoError(t, err)
+	pool.AppendCertsFromPEM(crt)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://localhost:8185/config", nil)
+	require.NoError(t, err)
+
+	resp, err := (&http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}},
+	}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 //nolint:funlen
@@ -1331,68 +1287,6 @@ func TestProcessTokenProtocol(t *testing.T) {
 			assert.Equal(t, tt.expectedAuthHeader, req.Header.Get("Authorization"))
 		})
 	}
-}
-
-// TestConfigureTLSContext_NoConfig tests when both skipTLSVerify and caCert are not set.
-func TestConfigureTLSContext_NoConfig(t *testing.T) {
-	baseCtx := context.Background()
-	resultCtx := configureTLSContext(baseCtx, nil, nil)
-
-	// Context should remain unchanged when no TLS configuration is provided
-	assert.Equal(t, baseCtx, resultCtx, "Context should remain unchanged when no TLS configuration is provided")
-}
-
-/*
-TestConfigureTLSContext_SkipTLS tests when skipTLSVerify is set to true.
-The OIDC library would use this context to make requests
-We can't directly extract the client, but we can verify the behavior
-by checking that the context was modified (indicating TLS config was applied).
-*/
-func TestConfigureTLSContext_SkipTLS(t *testing.T) {
-	// Create a test server that requires TLS
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("TLS connection successful"))
-		require.NoError(t, err)
-	}))
-	defer server.Close()
-
-	baseCtx := context.Background()
-	skipTLSVerify := true
-	resultCtx := configureTLSContext(baseCtx, &skipTLSVerify, nil)
-
-	// Context should be modified when skipTLSVerify is true
-	assert.NotEqual(t, baseCtx, resultCtx, "Context should be modified when skipTLSVerify is true")
-
-	// Test that the configured context can make TLS requests with skip verification
-	// This verifies that the TLS configuration was actually applied
-	_, err := http.NewRequestWithContext(resultCtx, "GET", server.URL, nil)
-	require.NoError(t, err)
-}
-
-// TestConfigureTLSContext_CACert tests when caCert is provided.
-func TestConfigureTLSContext_CACert(t *testing.T) {
-	// Read the pre-generated CA certificate from testdata
-	caCertBytes, err := os.ReadFile("headlamp_testdata/ca.crt")
-	require.NoError(t, err)
-
-	// Test the configureTLSContext function with the CA certificate
-	baseCtx := context.Background()
-	caCert := string(caCertBytes)
-	resultCtx := configureTLSContext(baseCtx, nil, &caCert)
-
-	// Context should be modified when caCert is provided
-	assert.NotEqual(t, baseCtx, resultCtx, "Context should be modified when caCert is provided")
-
-	// Verify that the CA certificate was parsed correctly by checking if it's valid PEM
-	block, _ := pem.Decode([]byte(caCert))
-	assert.NotNil(t, block, "CA certificate should be valid PEM format")
-	assert.Equal(t, "CERTIFICATE", block.Type, "CA certificate should be of type CERTIFICATE")
-
-	// Parse the CA certificate to verify it's valid
-	caCertParsed, err := x509.ParseCertificate(block.Bytes)
-	require.NoError(t, err)
-	assert.True(t, caCertParsed.IsCA, "Generated certificate should be a CA certificate")
 }
 
 // newFakeK8sServer create a mock k8s server for testing purpose,

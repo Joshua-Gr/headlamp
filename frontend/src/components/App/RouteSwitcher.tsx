@@ -21,15 +21,13 @@ import { useDispatch } from 'react-redux';
 import { Redirect, Route, RouteProps, Switch, useHistory } from 'react-router-dom';
 import { getCluster, getSelectedClusters } from '../../lib/cluster';
 import { useCluster, useClustersConf } from '../../lib/k8s';
-import { testAuth } from '../../lib/k8s/apiProxy';
-import {
-  createRouteURL,
-  getDefaultRoutes,
-  getRoutePath,
-  getRouteUseClusterURL,
-  NotFoundRoute,
-  Route as RouteType,
-} from '../../lib/router';
+import { testAuth } from '../../lib/k8s/api/v1/clusterApi';
+import { NotFoundRoute } from '../../lib/router';
+import { createRouteURL } from '../../lib/router/createRouteURL';
+import { getDefaultRoutes } from '../../lib/router/getDefaultRoutes';
+import { getRoutePath } from '../../lib/router/getRoutePath';
+import { getRouteUseClusterURL } from '../../lib/router/getRouteUseClusterURL';
+import { Route as RouteType } from '../../lib/router/Route';
 import { useTypedSelector } from '../../redux/hooks';
 import { uiSlice } from '../../redux/uiSlice';
 import ErrorBoundary from '../common/ErrorBoundary';

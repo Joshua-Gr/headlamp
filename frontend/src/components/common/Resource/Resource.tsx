@@ -19,7 +19,7 @@ import Editor from '@monaco-editor/react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Divider from '@mui/material/Divider';
-import Grid, { GridProps, GridSize } from '@mui/material/Grid';
+import Grid, { GridProps } from '@mui/material/Grid';
 import IconButton from '@mui/material/IconButton';
 import Input, { InputProps } from '@mui/material/Input';
 import InputLabel from '@mui/material/InputLabel';
@@ -34,7 +34,7 @@ import { useTranslation } from 'react-i18next';
 import { generatePath, NavLinkProps, useLocation } from 'react-router-dom';
 import YAML from 'yaml';
 import { labelSelectorToQuery, ResourceClasses, useCluster } from '../../../lib/k8s';
-import { ApiError } from '../../../lib/k8s/apiProxy';
+import { ApiError } from '../../../lib/k8s/api/v2/ApiError';
 import { KubeCondition, KubeContainer, KubeContainerStatus } from '../../../lib/k8s/cluster';
 import { KubeEvent } from '../../../lib/k8s/event';
 import { KubeObject } from '../../../lib/k8s/KubeObject';
@@ -42,7 +42,8 @@ import { KubeObjectInterface } from '../../../lib/k8s/KubeObject';
 import { KubeObjectClass } from '../../../lib/k8s/KubeObject';
 import Pod, { KubePod, KubeVolume } from '../../../lib/k8s/pod';
 import { METRIC_REFETCH_INTERVAL_MS, PodMetrics } from '../../../lib/k8s/PodMetrics';
-import { createRouteURL, RouteURLProps } from '../../../lib/router';
+import { RouteURLProps } from '../../../lib/router';
+import { createRouteURL } from '../../../lib/router/createRouteURL';
 import { getThemeName } from '../../../lib/themes';
 import { localeDate, useId } from '../../../lib/util';
 import { HeadlampEventType, useEventCallback } from '../../../redux/headlampEventSlice';
@@ -1016,7 +1017,7 @@ export function ContainerInfo(props: ContainerInfoProps) {
       {
         name: t('Volume Mounts'),
         value: <VolumeMounts mounts={container?.volumeMounts || undefined} />,
-        valueCellProps: { sm: 12 as GridSize },
+        valueFullRow: true,
         hide: _.isEmpty(container?.volumeMounts),
       },
     ];

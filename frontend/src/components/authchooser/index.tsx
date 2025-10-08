@@ -25,8 +25,10 @@ import { generatePath, useHistory, useLocation } from 'react-router-dom';
 import { getAppUrl } from '../../helpers/getAppUrl';
 import { getCluster, getClusterPrefixedPath } from '../../lib/cluster';
 import { useClustersConf } from '../../lib/k8s';
-import { testAuth } from '../../lib/k8s/apiProxy';
-import { createRouteURL, getRoute, getRoutePath } from '../../lib/router';
+import { testAuth } from '../../lib/k8s/api/v1/clusterApi';
+import { createRouteURL } from '../../lib/router/createRouteURL';
+import { getRoute } from '../../lib/router/getRoute';
+import { getRoutePath } from '../../lib/router/getRoutePath';
 import { setConfig } from '../../redux/configSlice';
 import { ClusterDialog } from '../cluster/Chooser';
 import { DialogTitle } from '../common/Dialog';
@@ -215,8 +217,13 @@ function AuthChooser({ children }: AuthChooserProps) {
         numClusters > 1 ? history.goBack() : history.push('/');
       }}
       handleTokenAuth={() => {
+        const tokenRoute = getRoute('token');
+        if (!tokenRoute) {
+          console.error("Can't find 'token' route");
+          return;
+        }
         history.push({
-          pathname: generatePath(getRoutePath(getRoute('token')), {
+          pathname: generatePath(getRoutePath(tokenRoute), {
             cluster: clusterName as string,
           }),
         });

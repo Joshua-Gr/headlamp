@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { isElectron } from '../../helpers/isElectron';
 import { useSelectedClusters } from '../../lib/k8s';
 import CRD from '../../lib/k8s/crd';
-import { createRouteURL } from '../../lib/router';
+import { createRouteURL } from '../../lib/router/createRouteURL';
 import { useTypedSelector } from '../../redux/hooks';
 import { DefaultSidebars, SidebarItemProps } from '.';
 
@@ -246,6 +246,10 @@ export const useSidebarItems = (sidebarName: string = DefaultSidebars.IN_CLUSTER
           {
             name: 'endpoints',
             label: t('glossary|Endpoints'),
+          },
+          {
+            name: 'endpointslices',
+            label: t('glossary|Endpoint Slices'),
           },
           {
             name: 'ingresses',

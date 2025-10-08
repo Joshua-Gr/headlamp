@@ -47,11 +47,23 @@
                 <h1
                   class="MuiTypography-root MuiTypography-h1 MuiTypography-noWrap css-yeaech-MuiTypography-root"
                 >
-                  Endpoint
+                  Endpoint: my-endpoint
                 </h1>
                 <div
                   class="MuiBox-root css-ldp2l3"
-                />
+                >
+                  <button
+                    aria-label="Copy to clipboard"
+                    class="MuiButtonBase-root MuiIconButton-root MuiIconButton-sizeMedium css-whz9ym-MuiButtonBase-root-MuiIconButton-root"
+                    data-mui-internal-clone-element="true"
+                    tabindex="0"
+                    type="button"
+                  >
+                    <span
+                      class="MuiTouchRipple-root css-8je8zh-MuiTouchRipple-root"
+                    />
+                  </button>
+                </div>
               </div>
             </div>
             <div

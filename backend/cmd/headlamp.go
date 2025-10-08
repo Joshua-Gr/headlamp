@@ -21,7 +21,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -44,7 +43,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"github.com/kubernetes-sigs/headlamp/backend/pkg/auth"
+	auth "github.com/kubernetes-sigs/headlamp/backend/pkg/auth"
 	"github.com/kubernetes-sigs/headlamp/backend/pkg/cache"
 	cfg "github.com/kubernetes-sigs/headlamp/backend/pkg/config"
 
@@ -54,6 +53,7 @@ import (
 	"github.com/kubernetes-sigs/headlamp/backend/pkg/logger"
 	"github.com/kubernetes-sigs/headlamp/backend/pkg/plugins"
 	"github.com/kubernetes-sigs/headlamp/backend/pkg/portforward"
+	"github.com/kubernetes-sigs/headlamp/backend/pkg/spa"
 	"github.com/kubernetes-sigs/headlamp/backend/pkg/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel/attribute"
@@ -110,64 +110,10 @@ type clientConfig struct {
 	IsDynamicClusterEnabled bool      `json:"isDynamicClusterEnabled"`
 }
 
-type spaHandler struct {
-	staticPath string
-	indexPath  string
-	baseURL    string
-}
-
 type OauthConfig struct {
 	Config   *oauth2.Config
 	Verifier *oidc.IDTokenVerifier
 	Ctx      context.Context
-}
-
-func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.Contains(r.URL.Path, "..") {
-		http.Error(w, "Contains unexpected '..'", http.StatusBadRequest)
-		return
-	}
-
-	absStaticPath, err := filepath.Abs(h.staticPath)
-	if err != nil {
-		logger.Log(logger.LevelError, nil, err, "getting absolute static path")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-
-		return
-	}
-
-	// Clean the path to prevent directory traversal
-	path := filepath.Clean(r.URL.Path)
-	path = strings.TrimPrefix(path, h.baseURL)
-
-	// prepend the path with the path to the static directory
-	path = filepath.Join(absStaticPath, path)
-
-	// This is defensive, for preventing using files outside of the staticPath
-	// if in the future we touch the code.
-	absPath, err := filepath.Abs(path)
-	if err != nil || !strings.HasPrefix(absPath, absStaticPath) {
-		http.Error(w, "Invalid file name (file to serve is outside of the static dir!)", http.StatusBadRequest)
-		return
-	}
-
-	// check whether a file exists at the given path
-	_, err = os.Stat(path)
-	if os.IsNotExist(err) {
-		// file does not exist, serve index.html
-		http.ServeFile(w, r, filepath.Join(absStaticPath, h.indexPath))
-		return
-	} else if err != nil {
-		// if we got an error (that wasn't that the file doesn't exist) stating the
-		// file, return a 500 internal server error and stop
-		logger.Log(logger.LevelError, nil, err, "stating file")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-
-		return
-	}
-
-	// The file does exist, so we serve that.
-	http.ServeFile(w, r, path)
 }
 
 // returns True if a file exists.
@@ -180,23 +126,19 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-// copy a file, whilst doing some search/replace on the data.
-func copyReplace(src string, dst string,
-	search []byte, replace []byte,
-	search2 []byte, replace2 []byte,
-) {
-	data, err := os.ReadFile(src)
+func mustReadFile(path string) []byte {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		// Error Reading the file
 		logger.Log(logger.LevelError, nil, err, "reading file")
 		os.Exit(1)
 	}
 
-	data1 := bytes.ReplaceAll(data, search, replace)
-	data2 := bytes.ReplaceAll(data1, search2, replace2)
-	fileMode := 0o600
+	return data
+}
 
-	err = os.WriteFile(dst, data2, fs.FileMode(fileMode))
+func mustWriteFile(path string, data []byte) {
+	err := os.WriteFile(path, data, fs.FileMode(0o600))
 	if err != nil {
 		// Error writing the file
 		logger.Log(logger.LevelError, nil, err, "writing file")
@@ -204,11 +146,7 @@ func copyReplace(src string, dst string,
 	}
 }
 
-// make sure the base-url is updated in the index.html file.
-func baseURLReplace(staticDir string, baseURL string) {
-	indexBaseURL := path.Join(staticDir, "index.baseUrl.html")
-	index := path.Join(staticDir, "index.html")
-
+func makeBaseURLReplacements(data []byte, baseURL string) []byte {
 	replaceURL := baseURL
 	if baseURL == "" {
 		// We have to do the replace when baseURL == "" because of the case when
@@ -217,20 +155,45 @@ func baseURLReplace(staticDir string, baseURL string) {
 		replaceURL = "/"
 	}
 
-	if !fileExists(indexBaseURL) {
-		copyReplace(index, indexBaseURL, []byte(""), []byte(""), []byte(""), []byte(""))
-	}
+	// Replacement for headlampBaseUrl - matched from the known index.html content
+	data = bytes.ReplaceAll(
+		data,
+		[]byte("headlampBaseUrl = __baseUrl__"),
+		[]byte(fmt.Sprintf("headlampBaseUrl = '%s'", replaceURL)),
+	)
 
-	copyReplace(indexBaseURL,
-		index,
-		[]byte("headlampBaseUrl = './'"),
-		[]byte("headlampBaseUrl = '"+replaceURL+"'"),
-		// Replace any resource that has "./" in it
+	// Replace any resource that has "./" in it
+	data = bytes.ReplaceAll(
+		data,
 		[]byte("./"),
-		[]byte(baseURL+"/"))
+		[]byte(fmt.Sprintf("%s/", baseURL)),
+	)
 
 	// Insert baseURL in css url() imports, they don't have "./" in them
-	copyReplace(index, index, []byte("url("), []byte("url("+baseURL+"/"), []byte(""), []byte(""))
+	data = bytes.ReplaceAll(
+		data,
+		[]byte("url("),
+		[]byte(fmt.Sprintf("url(%s/", baseURL)),
+	)
+
+	return data
+}
+
+// make sure the base-url is updated in the index.html file.
+func baseURLReplace(staticDir string, baseURL string) {
+	indexBaseURL := path.Join(staticDir, "index.baseUrl.html")
+	index := path.Join(staticDir, "index.html")
+
+	// keep a copy of the untouched index.html file as the source for replacements
+	if !fileExists(indexBaseURL) {
+		d := mustReadFile(index)
+		mustWriteFile(indexBaseURL, d)
+	}
+
+	// replace baseURL starting from the original copy, incase we run this multiple times
+	data := mustReadFile(indexBaseURL)
+	output := makeBaseURLReplacements(data, baseURL)
+	mustWriteFile(index, output)
 }
 
 func getOidcCallbackURL(r *http.Request, config *HeadlampConfig) string {
@@ -414,6 +377,8 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	logger.Log(logger.LevelInfo, nil, nil, "Dynamic clusters support: "+fmt.Sprint(config.EnableDynamicClusters))
 	logger.Log(logger.LevelInfo, nil, nil, "Helm support: "+fmt.Sprint(config.EnableHelm))
 	logger.Log(logger.LevelInfo, nil, nil, "Proxy URLs: "+fmt.Sprint(config.ProxyURLs))
+	logger.Log(logger.LevelInfo, nil, nil, "TLS certificate path: "+config.TLSCertPath)
+	logger.Log(logger.LevelInfo, nil, nil, "TLS key path: "+config.TLSKeyPath)
 
 	plugins.PopulatePluginsCache(config.StaticPluginDir, config.PluginDir, config.cache)
 
@@ -668,7 +633,7 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			return
 		}
 
-		ctx = configureTLSContext(ctx, oidcAuthConfig.SkipTLSVerify, oidcAuthConfig.CACert)
+		ctx = auth.ConfigureTLSContext(ctx, oidcAuthConfig.SkipTLSVerify, oidcAuthConfig.CACert)
 
 		if config.oidcValidatorIdpIssuerURL != "" {
 			ctx = oidc.InsecureIssuerURLContext(ctx, config.oidcValidatorIdpIssuerURL)
@@ -802,7 +767,7 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			}
 
 			// Set auth cookie
-			auth.SetTokenCookie(w, r, string(decodedState), rawUserToken)
+			auth.SetTokenCookie(w, r, string(decodedState), rawUserToken, config.BaseURL)
 
 			redirectURL += fmt.Sprintf("auth?cluster=%1s", decodedState)
 			http.Redirect(w, r, redirectURL, http.StatusSeeOther)
@@ -813,17 +778,19 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	})
 
 	// Serve the frontend if needed
-	if config.StaticDir != "" {
+	if spa.UseEmbeddedFiles {
+		r.PathPrefix("/").Handler(spa.NewEmbeddedHandler(spa.StaticFilesEmbed, "index.html", config.BaseURL))
+	} else if config.StaticDir != "" {
 		staticPath := config.StaticDir
 
 		if isWindows {
-			// We supPort unix paths on windows. So "frontend/static" works.
+			// We support unix paths on windows. So "frontend/static" works.
 			if strings.Contains(config.StaticDir, "/") {
 				staticPath = filepath.FromSlash(config.StaticDir)
 			}
 		}
 
-		spa := spaHandler{staticPath: staticPath, indexPath: "index.html", baseURL: config.BaseURL}
+		spa := spa.NewHandler(staticPath, "index.html", config.BaseURL)
 		r.PathPrefix("/").Handler(spa)
 
 		http.Handle("/", r)
@@ -849,165 +816,6 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 	return r
 }
 
-func getExpiryTime(payload map[string]interface{}) (time.Time, error) {
-	exp, ok := payload["exp"].(float64)
-	if !ok {
-		return time.Time{}, errors.New("expiry time not found or invalid")
-	}
-
-	return time.Unix(int64(exp), 0), nil
-}
-
-func isTokenAboutToExpire(token string) bool {
-	const tokenParts = 3
-
-	parts := strings.Split(token, ".")
-	if len(parts) != tokenParts {
-		return false
-	}
-
-	payload, err := auth.DecodeBase64JSON(parts[1])
-	if err != nil {
-		logger.Log(logger.LevelError, nil, err, "failed to decode payload")
-		return false
-	}
-
-	expiryTime, err := getExpiryTime(payload)
-	if err != nil {
-		logger.Log(logger.LevelError, nil, err, "failed to get expiry time")
-		return false
-	}
-
-	return time.Until(expiryTime) <= JWTExpirationTTL
-}
-
-// configureTLSContext configures TLS settings for the HTTP client in the context.
-// If skipTLSVerify is true, TLS verification will be skipped.
-// If caCert is provided, it will be added to the certificate pool for TLS verification.
-func configureTLSContext(ctx context.Context, skipTLSVerify *bool, caCert *string) context.Context {
-	if skipTLSVerify != nil && *skipTLSVerify {
-		tlsSkipTransport := &http.Transport{
-			// the gosec linter is disabled here because we are explicitly requesting to skip TLS verification.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
-		ctx = oidc.ClientContext(ctx, &http.Client{Transport: tlsSkipTransport})
-	}
-
-	if caCert != nil {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM([]byte(*caCert)) {
-			// Log error but continue with original context
-			logger.Log(logger.LevelError, nil,
-				errors.New("failed to append ca cert to pool"), "couldn't add custom cert to context")
-			return ctx
-		}
-
-		// the gosec linter is disabled because gosec promotes using a minVersion of TLS 1.2 or higher.
-		// since we are using a custom CA cert configured by the user, we are not forcing a minVersion.
-		customTransport := &http.Transport{
-			TLSClientConfig: &tls.Config{ //nolint:gosec
-				RootCAs: caCertPool,
-			},
-		}
-
-		ctx = oidc.ClientContext(ctx, &http.Client{Transport: customTransport})
-	}
-
-	return ctx
-}
-
-func refreshAndCacheNewToken(oidcAuthConfig *kubeconfig.OidcConfig,
-	cache cache.Cache[interface{}],
-	tokenType, token, issuerURL string,
-) (*oauth2.Token, error) {
-	ctx := context.Background()
-	ctx = configureTLSContext(ctx, oidcAuthConfig.SkipTLSVerify, oidcAuthConfig.CACert)
-
-	// get provider
-	provider, err := oidc.NewProvider(ctx, issuerURL)
-	if err != nil {
-		return nil, fmt.Errorf("getting provider: %v", err)
-	}
-	// get refresh token
-	newToken, err := getNewToken(
-		oidcAuthConfig.ClientID,
-		oidcAuthConfig.ClientSecret,
-		cache,
-		tokenType,
-		token,
-		provider.Endpoint().TokenURL,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("refreshing token: %v", err)
-	}
-
-	return newToken, nil
-}
-
-// getNewToken uses the provided credentials and fetches the old refresh
-// token from the cache to obtain a new OAuth2 token
-// from the specified token URL endpoint.
-func getNewToken(clientID, clientSecret string, cache cache.Cache[interface{}],
-	tokenType string, token string, tokenURL string,
-) (*oauth2.Token, error) {
-	// get refresh token
-	refreshToken, err := cache.Get(context.Background(), fmt.Sprintf("oidc-token-%s", token))
-	if err != nil {
-		return nil, fmt.Errorf("getting refresh token: %v", err)
-	}
-
-	rToken, ok := refreshToken.(string)
-	if !ok {
-		return nil, fmt.Errorf("failed to get refresh token")
-	}
-
-	// Create OAuth2 config with client credentials and token endpoint
-	conf := &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Endpoint: oauth2.Endpoint{
-			TokenURL: tokenURL,
-		},
-	}
-
-	// Request new token using the refresh token
-	newToken, err := conf.TokenSource(context.Background(), &oauth2.Token{
-		RefreshToken: rToken,
-	}).Token()
-	if err != nil {
-		return nil, err
-	}
-
-	// update the refresh token in the cache
-	if err := cacheRefreshedToken(newToken, tokenType, token, rToken, cache); err != nil {
-		return nil, fmt.Errorf("caching refreshed token: %v", err)
-	}
-
-	return newToken, nil
-}
-
-// cacheRefreshedToken updates the refresh token in the cache.
-func cacheRefreshedToken(token *oauth2.Token, tokenType string, oldToken string,
-	oldRefreshToken string, cache cache.Cache[interface{}],
-) error {
-	newToken, ok := token.Extra(tokenType).(string)
-	if ok {
-		if err := cache.Set(context.Background(), fmt.Sprintf("oidc-token-%s", newToken), token.RefreshToken); err != nil {
-			logger.Log(logger.LevelError, nil, err, "failed to cache refreshed token")
-			return err
-		}
-
-		// set ttl to 10 seconds for old token to handle case when the new token is not accepted by the client.
-		if err := cache.SetWithTTL(context.Background(), fmt.Sprintf("oidc-token-%s", oldToken),
-			oldRefreshToken, time.Until(token.Expiry)); err != nil {
-			logger.Log(logger.LevelError, nil, err, "failed to cache refreshed token")
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfig,
 	cache cache.Cache[interface{}], token string,
 	w http.ResponseWriter, r *http.Request, cluster string, span trace.Span, ctx context.Context,
@@ -1018,12 +826,18 @@ func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfi
 		tokenType = "access_token"
 	}
 
-	newToken, err := refreshAndCacheNewToken(
+	idpIssuerURL := c.oidcIdpIssuerURL
+	if idpIssuerURL == "" {
+		idpIssuerURL = oidcAuthConfig.IdpIssuerURL
+	}
+
+	newToken, err := auth.RefreshAndCacheNewToken(
+		ctx,
 		oidcAuthConfig,
 		cache,
 		tokenType,
 		token,
-		c.oidcIdpIssuerURL,
+		idpIssuerURL,
 	)
 	if err != nil {
 		logger.Log(logger.LevelError, map[string]string{"cluster": cluster},
@@ -1039,7 +853,7 @@ func (c *HeadlampConfig) refreshAndSetToken(oidcAuthConfig *kubeconfig.OidcConfi
 		}
 
 		// Set refreshed token in cookie
-		auth.SetTokenCookie(w, r, cluster, newTokenString)
+		auth.SetTokenCookie(w, r, cluster, newTokenString, c.BaseURL)
 
 		c.telemetryHandler.RecordEvent(span, "Token refreshed successfully")
 	}
@@ -1162,7 +976,7 @@ func (c *HeadlampConfig) OIDCTokenRefreshMiddleware(next http.Handler) http.Hand
 		}
 
 		// skip if token is not about to expire
-		if !isTokenAboutToExpire(token) {
+		if !auth.IsTokenAboutToExpire(token) {
 			c.telemetryHandler.RecordEvent(span, "Token not about to expire, skipping refresh")
 			next.ServeHTTP(w, r)
 			c.telemetryHandler.RecordDuration(ctx, start,
@@ -1232,15 +1046,18 @@ func StartHeadlampServer(config *HeadlampConfig) {
 	}
 
 	handler := createHeadlampHandler(config)
-
 	handler = config.OIDCTokenRefreshMiddleware(handler)
 
 	addr := fmt.Sprintf("%s:%d", config.ListenAddr, config.Port)
 
-	// Start server
-	if err := http.ListenAndServe(addr, handler); err != nil { //nolint:gosec
-		logger.Log(logger.LevelError, nil, err, "Failed to start server")
+	if config.TLSCertPath != "" && config.TLSKeyPath != "" {
+		err = http.ListenAndServeTLS(addr, config.TLSCertPath, config.TLSKeyPath, handler) //nolint:gosec
+	} else {
+		err = http.ListenAndServe(addr, handler) //nolint:gosec
+	}
 
+	if err != nil {
+		logger.Log(logger.LevelError, nil, err, "Failed to start server")
 		HandleServerStartError(&err)
 	}
 }
@@ -2528,9 +2345,9 @@ func (c *HeadlampConfig) handleSetToken(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Token == "" {
-		auth.ClearTokenCookie(w, r, cluster)
+		auth.ClearTokenCookie(w, r, cluster, c.BaseURL)
 	} else {
-		auth.SetTokenCookie(w, r, cluster, req.Token)
+		auth.SetTokenCookie(w, r, cluster, req.Token, c.BaseURL)
 	}
 
 	w.WriteHeader(http.StatusOK)

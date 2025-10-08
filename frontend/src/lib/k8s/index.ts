@@ -20,7 +20,8 @@ import { useHistory } from 'react-router-dom';
 import { ConfigState } from '../../redux/configSlice';
 import { useTypedSelector } from '../../redux/hooks';
 import { getCluster, getSelectedClusters } from '../cluster';
-import { ApiError, clusterRequest } from './apiProxy';
+import { clusterRequest } from './api/v1/clusterRequests';
+import { ApiError } from './api/v2/ApiError';
 import { Cluster, LabelSelector, StringDict } from './cluster';
 import ClusterRole from './clusterRole';
 import ClusterRoleBinding from './clusterRoleBinding';
@@ -30,6 +31,7 @@ import CronJob from './cronJob';
 import DaemonSet from './daemonSet';
 import Deployment from './deployment';
 import Endpoints from './endpoints';
+import EndpointSlice from './endpointSlices';
 import Gateway from './gateway';
 import GatewayClass from './gatewayClass';
 import GRPCRoute from './grpcRoute';
@@ -70,6 +72,7 @@ export const ResourceClasses = {
   Deployment,
   Endpoint: Endpoints,
   Endpoints,
+  EndpointSlice,
   LimitRange,
   Lease,
   ResourceQuota,

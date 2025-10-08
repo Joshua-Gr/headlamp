@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { ReactNode } from 'react';
-import { KubeObject } from '../lib/k8s/KubeObject';
+import type { PayloadAction } from '@reduxjs/toolkit';
+import { createSlice } from '@reduxjs/toolkit';
+import type { ReactNode } from 'react';
+import type { ButtonStyle } from '../components/common/ActionButton/ActionButton';
+import type { KubeObject } from '../lib/k8s/KubeObject';
 
 export interface ProjectDefinition {
   id: string;
@@ -48,15 +50,23 @@ export interface ProjectOverviewSection {
 
 export interface ProjectDetailsTab {
   id: string;
-  label: string;
+  label?: ReactNode;
   icon: string | ReactNode;
-  component: (props: { project: ProjectDefinition; projectResources: KubeObject[] }) => ReactNode;
+  component?: (props: { project: ProjectDefinition; projectResources: KubeObject[] }) => ReactNode;
+  /** Function to check if this tab be displayed in the given project. If not provided the Tab will be enabled. */
+  isEnabled?: ({ project }: { project: ProjectDefinition }) => Promise<boolean>;
+}
+
+export interface ProjectDeleteButton {
+  isEnabled?: (params: { project: ProjectDefinition }) => Promise<boolean>;
+  component: (props: { project: ProjectDefinition; buttonStyle?: ButtonStyle }) => ReactNode;
 }
 
 export interface ProjectsState {
   customCreateProject: Record<string, CustomCreateProject>;
   overviewSections: Record<string, ProjectOverviewSection>;
   detailsTabs: Record<string, ProjectDetailsTab>;
+  projectDeleteButton?: ProjectDeleteButton;
 }
 
 const initialState: ProjectsState = {
@@ -83,9 +93,15 @@ const projectsSlice = createSlice({
     addOverviewSection(state, action: PayloadAction<ProjectOverviewSection>) {
       state.overviewSections[action.payload.id] = action.payload;
     },
+
+    /** Override default delete button */
+    setProjectDeleteButton(state, action: PayloadAction<ProjectDeleteButton>) {
+      state.projectDeleteButton = action.payload;
+    },
   },
 });
 
-export const { addCustomCreateProject, addDetailsTab, addOverviewSection } = projectsSlice.actions;
+export const { addCustomCreateProject, addDetailsTab, addOverviewSection, setProjectDeleteButton } =
+  projectsSlice.actions;
 
 export default projectsSlice.reducer;

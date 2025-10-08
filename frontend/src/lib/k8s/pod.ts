@@ -15,9 +15,12 @@
  */
 
 import { Base64 } from 'js-base64';
-import { post, stream, StreamArgs, StreamResultsCb } from './apiProxy';
-import { KubeCondition, KubeContainer, KubeContainerStatus, Time } from './cluster';
-import { KubeObject, KubeObjectInterface } from './KubeObject';
+import { post } from './api/v1/clusterRequests';
+import type { StreamArgs, StreamResultsCb } from './api/v1/streamingApi';
+import { stream } from './api/v1/streamingApi';
+import type { KubeCondition, KubeContainer, KubeContainerStatus, Time } from './cluster';
+import type { KubeObjectInterface } from './KubeObject';
+import { KubeObject } from './KubeObject';
 
 export interface KubeVolume {
   name: string;

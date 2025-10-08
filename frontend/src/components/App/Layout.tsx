@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { Typography } from '@mui/material';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Container from '@mui/material/Container';
@@ -23,12 +24,12 @@ import { styled } from '@mui/material/styles';
 import { Dispatch, UnknownAction } from '@reduxjs/toolkit';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { useDispatch } from 'react-redux';
 import { getCluster } from '../../lib/cluster';
 import { getSelectedClusters } from '../../lib/cluster';
 import { useClustersConf } from '../../lib/k8s';
-import { request } from '../../lib/k8s/apiProxy';
+import { request } from '../../lib/k8s/api/v1/clusterRequests';
 import { Cluster } from '../../lib/k8s/cluster';
 import { setConfig } from '../../redux/configSlice';
 import { ConfigState } from '../../redux/configSlice';
@@ -37,6 +38,7 @@ import store from '../../redux/stores/store';
 import { useUIPanelsGroupedBySide } from '../../redux/uiSlice';
 import { fetchStatelessClusterKubeConfigs, isEqualClusterConfigs } from '../../stateless/';
 import { ActivitiesRenderer } from '../activity/Activity';
+import { ErrorPage, Loader } from '../common';
 import ActionsNotifier from '../common/ActionsNotifier';
 import AlertNotification from '../common/AlertNotification';
 import DetailsDrawer from '../common/Resource/DetailsDrawer';
@@ -177,6 +179,8 @@ const fetchConfig = (dispatch: Dispatch<UnknownAction>) => {
   });
 };
 
+const disableBackendLoader = true;
+
 export default function Layout({}: LayoutProps) {
   const arePluginsLoaded = useTypedSelector(state => state.plugins.loaded);
   const dispatch = useDispatch();
@@ -190,10 +194,16 @@ export default function Layout({}: LayoutProps) {
    * indexDB and then sends the backend to parse it and then updates the parsed value into redux
    * store on an interval.
    * */
-  useQuery({
+  const {
+    data: config,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: ['cluster-fetch'],
     queryFn: () => fetchConfig(dispatch),
-    refetchInterval: CLUSTER_FETCH_INTERVAL,
+    refetchInterval: disableBackendLoader
+      ? CLUSTER_FETCH_INTERVAL
+      : query => (query.state.status === 'error' ? false : CLUSTER_FETCH_INTERVAL),
   });
 
   // Remove splash screen styles from the body
@@ -213,6 +223,42 @@ export default function Layout({}: LayoutProps) {
   const MAXIMUM_NUM_ALERTS = 2;
 
   const panels = useUIPanelsGroupedBySide();
+
+  if (!disableBackendLoader) {
+    if (error && !config) {
+      return <ErrorPage message={<Trans>Failed to connect to the backend</Trans>} error={error} />;
+    }
+
+    if (isLoading) {
+      return (
+        <Box
+          sx={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            width: '100dvw',
+            height: '100dvh',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 2,
+            animation: 'loader-appear',
+            animationFillMode: 'both',
+            animationDelay: '2s',
+            animationDuration: '0.3s',
+
+            '@keyframes loader-appear': {
+              from: { opacity: 0 },
+              to: { opacity: 1 },
+            },
+          }}
+        >
+          <Loader title={t('Connecting to backend...')} />
+          <Typography>{t('Connecting to backend...')}</Typography>
+        </Box>
+      );
+    }
+  }
 
   return (
     <>
